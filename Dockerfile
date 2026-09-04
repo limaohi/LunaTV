@@ -55,10 +55,5 @@ USER nextjs
 
 EXPOSE 3000
 
-ENV USERNAME=admin
-ENV PASSWORD=admin
-ENV NEXT_PUBLIC_STORAGE_TYPE=redis
-ENV REDIS_URL=redis://default:b5aAUBobsyo2oCXqFDZANbOQGfumB8lx@drawer-sprout-fly-59830.db.redis.io:14667
-
 # 使用自定义启动脚本，先预加载配置再启动服务器
 CMD ["node", "start.js"] 
