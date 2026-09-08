@@ -6,14 +6,17 @@ on:
       tag:
         description: 'Docker 标签'
         required: false
-        default: 'latest'
+        default: 'v1'
         type: string
+
   push:
-    branches: [ main, master ]
+    branches: [main, master]
+
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
+
   release:
-    types: [ published ]
+    types: [published]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,6 +27,9 @@ permissions:
   packages: write
   actions: write
 
+env:
+  IMAGE_NAME: ghcr.io/limaohi/lunatv
+
 jobs:
   build:
     strategy:
@@ -33,20 +39,24 @@ jobs:
             os: ubuntu-latest
           - platform: linux/arm64
             os: ubuntu-24.04-arm
+
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Prepare platform name
         run: |
-          echo "PLATFORM_NAME=${{ matrix.platform }}" | sed 's|/|-|g' >> $GITHUB_ENV
+          echo "PLATFORM_NAME=${{ matrix.platform }}" | sed 's|/|-|g' >> "$GITHUB_ENV"
 
       - name: Determine Docker tag
         id: docker-tag
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+            echo "tag=v1" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Checkout source code
@@ -62,18 +72,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set lowercase repository owner
-        id: lowercase
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
-
         with:
-          images: ghcr.io/limaohi/lunatv
+          images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ github.event.inputs.tag || 'latest' }},enable={{is_default_branch}}
+            type=raw,value=${{ steps.docker-tag.outputs.tag }}
             type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
 
@@ -85,10 +90,12 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          tags: ghcr.io/limaohi/lunatv:${{ steps.docker-tag.outputs.tag }}
-          outputs: type=image,name=ghcr.io/limaohi/lunatv,name-canonical=true,push=true
+
+          # 每个平台先按 digest 推送；merge job 再创建多架构 tag。
+          outputs: type=image,name=${{ env.IMAGE_NAME }},name-canonical=true,push-by-digest=true,push=true
 
       - name: Export digest
+        shell: bash
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
@@ -104,8 +111,8 @@ jobs:
 
   merge:
     runs-on: ubuntu-latest
-    needs:
-      - build
+    needs: [build]
+
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -124,30 +131,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set lowercase repository owner
-        id: lowercase
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
       - name: Determine Docker tag
         id: docker-tag
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
+            echo "tag=v1" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create manifest list and push
+      - name: Create multi-architecture manifest and push
         working-directory: /tmp/digests
+        shell: bash
         run: |
-          docker buildx imagetools create -t ghcr.io/limaohi/lunatv:${{ steps.docker-tag.outputs.tag }} \
-            $(printf 'ghcr.io/limaohi/lunatv@sha256:%s ' *)
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:${{ steps.docker-tag.outputs.tag }}" \
+            $(printf "${IMAGE_NAME}@sha256:%s " *)
 
   cleanup-refresh:
     runs-on: ubuntu-latest
-    needs:
-      - merge
+    needs: [merge]
     if: always()
+
     steps:
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@main
