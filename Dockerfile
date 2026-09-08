@@ -1,61 +1,59 @@
-# syntax=docker/dockerfile:1
-
 # ---- 第 1 阶段：安装依赖 ----
 FROM node:20-alpine AS deps
 
+# 启用 corepack 并激活 pnpm（Node20 默认提供 corepack）
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
 WORKDIR /app
 
-RUN corepack enable \
-    && corepack prepare pnpm@latest --activate
-
+# 仅复制依赖清单，提高构建缓存利用率
 COPY package.json pnpm-lock.yaml ./
 
+# 安装所有依赖（含 devDependencies，后续会裁剪）
 RUN pnpm install --frozen-lockfile
 
-
-# ---- 第 2 阶段：构建并生成 manifest.json ----
+# ---- 第 2 阶段：构建项目 ----
 FROM node:20-alpine AS builder
-
+RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
-RUN corepack enable \
-    && corepack prepare pnpm@latest --activate
-
+# 复制依赖
 COPY --from=deps /app/node_modules ./node_modules
+# 复制全部源代码
 COPY . .
 
+# 在构建阶段也显式设置 DOCKER_ENV，
 ENV DOCKER_ENV=true
 
-# output: 'standalone' 会在这里生成 .next/standalone/server.js。
-# manifest 在构建期写入 public，运行期无需再写文件。
-RUN pnpm run build \
-    && node scripts/generate-manifest.js
+# 生成生产构建
+RUN pnpm run build
 
-
-# ---- 第 3 阶段：只读友好的运行镜像 ----
+# ---- 第 3 阶段：生成运行时镜像 ----
 FROM node:20-alpine AS runner
 
-WORKDIR /app
+# 创建非 root 用户
+RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 
+WORKDIR /app
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 ENV DOCKER_ENV=true
 
-RUN addgroup -g 1001 -S nodejs \
-    && adduser -u 1001 -S nextjs -G nodejs
+# 从构建器中复制 standalone 输出
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+# 从构建器中复制 scripts 目录
+COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
+# 从构建器中复制 start.js
+COPY --from=builder --chown=nextjs:nodejs /app/start.js ./start.js
+# 从构建器中复制 public 和 .next/static 目录
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# standalone 中包含 server.js、Next 运行时和追踪到的依赖
-COPY --from=builder --chown=1001:1001 /app/.next/standalone ./
-
-# standalone 默认不携带这些静态资源；复制进 standalone 运行目录。
-COPY --from=builder --chown=1001:1001 /app/public ./public
-COPY --from=builder --chown=1001:1001 /app/.next/static ./.next/static
-
-USER 1001:1001
+# 切换到非特权用户
+USER nextjs
 
 EXPOSE 3000
 
-# 不调用原项目的 start.js，
-# 因此容器启动时不会执行 generate-manifest.js。
-CMD ["node", "server.js"]
+# 使用自定义启动脚本，先预加载配置再启动服务器
+CMD ["node", "start.js"] 
