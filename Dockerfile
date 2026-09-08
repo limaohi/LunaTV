@@ -50,6 +50,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/start.js ./start.js
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+RUN mkdir -p /app/public \
+    && chown -R nextjs:nodejs /app \
+    && chmod 755 /app \
+    && chmod 755 /app/public
+
 # 切换到非特权用户
 USER nextjs
 
